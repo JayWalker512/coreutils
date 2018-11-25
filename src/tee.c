@@ -71,7 +71,7 @@ typedef struct teep_params_container_s {
 	teep_params_shared_t * shared;
 } teep_params_container_t;
 
-static void * parallel_tee(teep_params_container_t * container);
+static void * parallel_tee(void * container);
 static bool tee_files (int nfiles, char **files);
 
 /* If true, append to output files rather than truncating them. */
@@ -229,26 +229,33 @@ main (int argc, char **argv)
 }
 
 static void *
-parallel_tee(teep_params_container_t * container)
+parallel_tee(void * container)
 {
-	teep_params_shared_t * shared = (*container).shared;
-	teep_params_t * params = (*container).params;
+	teep_params_container_t * c = (teep_params_container_t *)container;
+	teep_params_shared_t * shared = (*c).shared;
+	teep_params_t * params = (*c).params;
 
-	char stringBuffer[128] = {0};
-	
+	char stringBuffer[128] = {0}; //TODO FIXME debugging only
+	//while ((*params).thread_index == 0) {} //lock first thread to avoid clobbering other threads
 
 	static bool ok = true;
 	bool can_continue = true;
 	bool refilled_buffer = false;
+	
+	sprintf(stringBuffer, "Thread: &shared_params: %p, &params: %p\n", shared, params);
+	debugPrint(stringBuffer);
+	
 	while (can_continue) {
 	
-		sprintf(stringBuffer, "buffer: %p, bytes_read: %d, descriptor: %d\n",(*shared).buffer, (*shared).bytes_read, (*params).descriptor);
+		sprintf(stringBuffer, "Thread %d, buffer: %p, bytes_read: %ld, descriptor: %p\n",(*params).thread_index, (*shared).buffer, (*shared).bytes_read, (*params).descriptor);
 		debugPrint(stringBuffer);
 	
 		//Tee writing goes here
 		if ((*params).descriptor
 		&& fwrite ((*shared).buffer, (*shared).bytes_read, 1, (*params).descriptor) != 1)
 		{
+		
+			//This code is executed in the case that fwrite failed and we need to clean up + exit
 			int w_errno = errno;
 			bool fail = errno != EPIPE || (output_error == output_error_exit
 							              || output_error == output_error_warn);
@@ -339,7 +346,6 @@ tee_files (int nfiles, char **files)
   files[0] = bad_cast (_("standard output"));
   setvbuf (stdout, NULL, _IONBF, 0);
   n_outputs++; //standard output is always in the set of outputs
-
   
   //sprintf(stringBuffer, "315: n_outputs: %d, nfiles: %d\n", n_outputs, nfiles);
   //debugPrint(stringBuffer);
@@ -351,7 +357,7 @@ tee_files (int nfiles, char **files)
         {
           error (output_error == output_error_exit
                  || output_error == output_error_exit_nopipe,
-                 errno, "%s", quotef (files[i]));
+                 errno, "%s", quotef ("failed fixme")); //(files[i])); //FIXME ruling out cause of error
           ok = false;
         }
       else
@@ -361,7 +367,7 @@ tee_files (int nfiles, char **files)
         }
     }
     
-  sprintf(stringBuffer, "336: n_outputs: %ld, nfiles: %ld\n", n_outputs, nfiles);
+  sprintf(stringBuffer, "336: n_outputs: %lu, nfiles: %d\n", n_outputs, nfiles);
   debugPrint(stringBuffer);  
     
   //Descriptors are open and ready to go, read in the first data buffer
@@ -374,7 +380,7 @@ tee_files (int nfiles, char **files)
     can_continue = false; 
   }
    
-  sprintf(stringBuffer, "348: Can continue: %d, bytes_read: %d, errno: %d\n", (int)can_continue, bytes_read, errno);
+  sprintf(stringBuffer, "348: Can continue: %d, bytes_read: %ld, errno: %d\n", (int)can_continue, bytes_read, errno);
   debugPrint(stringBuffer);   
    
   if (can_continue) { 
@@ -410,13 +416,14 @@ tee_files (int nfiles, char **files)
 		  	params[i].descriptor = descriptors[i];
 		  	params[i].file = files[i];
 		  	
+		  	sprintf(stringBuffer, "Main: &shared_params: %p, &params: %p\n", &shared_params, &(params[i]));
+		  	debugPrint(stringBuffer);
 		  	containers[i].shared = &shared_params;
 		  	containers[i].params = &params[i];
 		  	
-		  	char stringBuffer[128] = {0};
 		  	sprintf(stringBuffer, "Starting thread index %d\n", i);
 		  	debugPrint(stringBuffer);
-		  	pthread_create(&workers[i], NULL, (void *)parallel_tee, &containers[i]);
+		  	pthread_create(&workers[i], NULL, (void *)parallel_tee, &(containers[i]));
 	    }
 	  }
   
@@ -424,7 +431,6 @@ tee_files (int nfiles, char **files)
 	  /* TODO FIXME make sure to only harvest threads actually spawned! Otherwise
 	   * we get segfaults most likely. */
 	  for (i = 0; i <= nfiles; i++) {
-	  	char stringBuffer[128] = {0};
 	  	sprintf(stringBuffer, "Waiting thread %d to die...\n", i);
 	  	debugPrint(stringBuffer);
 	  	
