@@ -250,7 +250,7 @@ parallel_tee(void * container)
 	debugPrint(stringBuffer);
 	#endif
 	
-	while (can_continue) {
+	while (can_continue && ok) {
 	
 		//Tee writing goes here
 		if ((*params).descriptor 
@@ -308,16 +308,18 @@ parallel_tee(void * container)
 			debugPrint(stringBuffer); //FIXME only for debugging
 			#endif
 		} else {
-			pthread_cond_wait((*shared).writable, (*shared).mutex);
+			if (ok) { //don't wait if we failed to write this time around!
+			#ifdef DEBUG
+			sprintf(stringBuffer, "Thread %d waiting for writable.\n", (*params).thread_index);
+			debugPrint(stringBuffer); //FIXME only for debugging
+			#endif
+			  pthread_cond_wait((*shared).writable, (*shared).mutex);
+			}
 		}
 		pthread_mutex_unlock((*shared).mutex);
 		if (refilled_buffer) { //avoid spurious wakeup by releasing lock before broadcast
 			pthread_cond_broadcast((*shared).writable);
 			refilled_buffer = false;
-		}
-		
-		if (!ok) {
-			return NULL;
 		}
 	}    
 
