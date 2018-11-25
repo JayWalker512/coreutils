@@ -21,13 +21,6 @@
 #include <signal.h>
 #include <getopt.h>
 
-//additions for Teep functionality
-#include <pthread.h>
-
-//TODO FIXME temporary for debugging
-#include <stdio.h>
-#include <stdlib.h>
-
 #include "system.h"
 #include "argmatch.h"
 #include "die.h"
@@ -36,8 +29,15 @@
 #include "stdio--.h"
 #include "xbinary-io.h"
 
+//additions for Teep functionality
+#include <pthread.h>
+
+//TODO FIXME temporary for debugging
+#include <stdio.h>
+#include <stdlib.h>
+
 /* The official name of this program (e.g., no 'g' prefix).  */
-#define PROGRAM_NAME "tee"
+#define PROGRAM_NAME "teep"
 
 #define AUTHORS \
   proper_name ("Mike Parker"), \
@@ -45,22 +45,33 @@
   proper_name ("David MacKenzie"), \
   proper_name ("Brandon Foltz")
 
-//this structure is shared by each worker BUT each worker has it's own descriptor
-typedef struct parallel_tee_params_s {
-	char * buffer;
-	ssize_t * bytes_read;
+//These values are assigned individually to independent threads
+typedef struct teep_params_s {
+	int thread_index;
 	FILE * descriptor;
-	char ** files;
-	
+	char * file;
+} teep_params_t;
+
+//These values are shared among the threads, and must be access mutually exclusively
+typedef struct teep_params_shared_s {
 	pthread_mutex_t * mutex;
 	pthread_cond_t * writable;
-	int * numWritersWaiting;
-	int threadIndex;
-	int numThreads;
-	bool * canContinue;
-} parallel_tee_params_t; 
+	char * buffer;
+	size_t buffer_size;
+	ssize_t bytes_read;
+	int num_writers_waiting;
+	int num_threads;
+	bool can_continue; //???
+} teep_params_shared_t; 
 
-static void * parallel_tee(parallel_tee_params_t * params);
+/*During setup we make multiple containers, each has the same pointer to shared
+  and a different pointer to unshared parameters. */
+typedef struct teep_params_container_s {
+	teep_params_t * params;
+	teep_params_shared_t * shared;
+} teep_params_container_t;
+
+static void * parallel_tee(teep_params_container_t * container);
 static bool tee_files (int nfiles, char **files);
 
 /* If true, append to output files rather than truncating them. */
@@ -208,7 +219,7 @@ main (int argc, char **argv)
   /* Do *not* warn if tee is given no file arguments.
      POSIX requires that it work when given no arguments.  */
 
-  pthread_mutex_init(&printMutex, NULL); //TODO FIXME delete me!
+  pthread_mutex_init(&printMutex, NULL); //TODO FIXME delete me when done debugging!
 
   ok = tee_files (argc - optind, &argv[optind]);
   if (close (STDIN_FILENO) != 0)
@@ -218,18 +229,25 @@ main (int argc, char **argv)
 }
 
 static void *
-parallel_tee(parallel_tee_params_t * params)
+parallel_tee(teep_params_container_t * container)
 {
+	teep_params_shared_t * shared = (*container).shared;
+	teep_params_t * params = (*container).params;
+
 	char stringBuffer[128] = {0};
-	sprintf(stringBuffer, "Thread for file %s started.\n", (*params).files[(*params).threadIndex]);
-	debugPrint(stringBuffer);
+	
+
 	static bool ok = true;
-	bool canContinue = true;
-	bool refilledBuffer = false;
-	while (canContinue) {
-		//TODO Tee writing goes here
+	bool can_continue = true;
+	bool refilled_buffer = false;
+	while (can_continue) {
+	
+		sprintf(stringBuffer, "buffer: %p, bytes_read: %d, descriptor: %d\n",(*shared).buffer, (*shared).bytes_read, (*params).descriptor);
+		debugPrint(stringBuffer);
+	
+		//Tee writing goes here
 		if ((*params).descriptor
-		&& fwrite ((*params).buffer, *(*params).bytes_read, 1, (*params).descriptor) != 1)
+		&& fwrite ((*shared).buffer, (*shared).bytes_read, 1, (*params).descriptor) != 1)
 		{
 			int w_errno = errno;
 			bool fail = errno != EPIPE || (output_error == output_error_exit
@@ -240,38 +258,46 @@ parallel_tee(parallel_tee_params_t * params)
 			{
 				error (output_error == output_error_exit
 				   || output_error == output_error_exit_nopipe,
-				   w_errno, "%s", quotef ((*params).files[(*params).threadIndex]));
+				   w_errno, "%s", ((*params).file));
 			}
 			(*params).descriptor = NULL;
 			if (fail) {
 			  ok = false;
 			  //n_outputs--; //FIXME This indicates we should quit? Go in critical section?
-			  //puts("One thread failed!"); //FIXME only for debugging
+			  sprintf(stringBuffer, "Thread %d failed.\n", (*params).thread_index);
+			  debugPrint(stringBuffer); //FIXME only for debugging
 			}
 		}
 	
-		pthread_mutex_lock((*params).mutex);
-		*(*params).numWritersWaiting += 1;
-		if (*(*params).numWritersWaiting == (*params).numThreads) {
+		pthread_mutex_lock((*shared).mutex);
+		(*shared).num_writers_waiting += 1;
+		
+		/*TODO Thread should do error HANDLING here, so it can update shared variables
+		such as number of threads, etc. */
+		
+		if ((*shared).num_writers_waiting == (*shared).num_threads) {
+		
+			//sprintf(stringBuffer, "Thread %d refilling the buffer.\n", (*params).thread_index);
+			//debugPrint(stringBuffer); //FIXME only for debugging
 			
 			//refill the buffer, and trigger all threads quitting if necessary
-			*(*params).bytes_read = read (0, (*params).buffer, sizeof (*params).buffer);
-		    if (*(*params).bytes_read < 0 && errno == EINTR)
-			  *(*params).canContinue = true;
-		    if (*(*params).bytes_read <= 0) {
-			  *(*params).canContinue = false;
+			(*shared).bytes_read = read (0, (*shared).buffer, (*shared).buffer_size);
+		    if ((*shared).bytes_read < 0 && errno == EINTR)
+			  (*shared).can_continue = true;
+		    if ((*shared).bytes_read <= 0) {
+			  (*shared).can_continue = false;
 			}
-			canContinue = *(*params).canContinue; //signalling other threads to quit (or not)
+			can_continue = (*shared).can_continue; //signalling other threads to quit (or not)
 			
-			*(*params).numWritersWaiting = 0;
-			refilledBuffer = true; 	
+			(*shared).num_writers_waiting = 0;
+			refilled_buffer = true; 	
 		} else {
-			pthread_cond_wait((*params).writable, (*params).mutex);
+			pthread_cond_wait((*shared).writable, (*shared).mutex);
 		}
-		pthread_mutex_unlock((*params).mutex);
-		if (refilledBuffer) { //avoid spurious wakeup by releasing lock before broadcast
-			pthread_cond_broadcast((*params).writable);
-			refilledBuffer = false;
+		pthread_mutex_unlock((*shared).mutex);
+		if (refilled_buffer) { //avoid spurious wakeup by releasing lock before broadcast
+			pthread_cond_broadcast((*shared).writable);
+			refilled_buffer = false;
 		}
 	}    
 
@@ -285,7 +311,10 @@ parallel_tee(parallel_tee_params_t * params)
 static bool
 tee_files (int nfiles, char **files)
 {
-  puts("Tee files"); //TODO FIXME debugging only
+  char stringBuffer[128] = {0};
+  sprintf(stringBuffer, "Starting tee_files\n");
+  debugPrint(stringBuffer); //TODO FIXME debugging only
+  
   size_t n_outputs = 0;
   FILE **descriptors;
   char buffer[BUFSIZ];
@@ -311,9 +340,9 @@ tee_files (int nfiles, char **files)
   setvbuf (stdout, NULL, _IONBF, 0);
   n_outputs++; //standard output is always in the set of outputs
 
-  char stringBuffer[128] = {0};
-  sprintf(stringBuffer, "315: n_outputs: %d, nfiles: %d\n", n_outputs, nfiles);
-  debugPrint(stringBuffer);
+  
+  //sprintf(stringBuffer, "315: n_outputs: %d, nfiles: %d\n", n_outputs, nfiles);
+  //debugPrint(stringBuffer);
   for (i = 1; i <= nfiles; i++)
     {
       /* Do not treat "-" specially - as mandated by POSIX.  */
@@ -335,57 +364,71 @@ tee_files (int nfiles, char **files)
   sprintf(stringBuffer, "336: n_outputs: %ld, nfiles: %ld\n", n_outputs, nfiles);
   debugPrint(stringBuffer);  
     
-  //descriptors are open and ready to go, read in the first data buffer
+  //Descriptors are open and ready to go, read in the first data buffer
   bytes_read = read(0, buffer, sizeof buffer);
-  bool canContinue = true;
+  bool can_continue = true;
   if (bytes_read < 0 && errno == EINTR) {
-    canContinue = true;
+    can_continue = true;
   }
   if (bytes_read <= 0) {
-    canContinue = false; 
+    can_continue = false; 
   }
    
-  sprintf(stringBuffer, "348: Can continue: %d, bytes_read: %d, errno: %d\n", (int)canContinue, bytes_read, errno);
+  sprintf(stringBuffer, "348: Can continue: %d, bytes_read: %d, errno: %d\n", (int)can_continue, bytes_read, errno);
   debugPrint(stringBuffer);   
    
-  if (canContinue) { 
-	  //setup and spawn worker threads 
+  if (can_continue) { 
+	  //Setup and spawn worker threads (continued below)
 	  pthread_t workers[nfiles];
-	  parallel_tee_params_t tee_params[nfiles]; 
 	  
-	  //these variables are shared among the threads
+	  //These variables are shared among the threads
 	  pthread_mutex_t mutex;
 	  pthread_cond_t writable;
 	  pthread_mutex_init(&mutex, NULL);
 	  pthread_cond_init(&writable, NULL);
-	  int numWritersWaiting = 0;
+	  
+	  //Set up parameter containers
+	  teep_params_container_t containers[nfiles];
+	  teep_params_t params[nfiles];
+	  teep_params_shared_t shared_params;
+	  
+	  /* Setup shared parameters that will be attached to the parameter containers. 
+	   * We can do this ahead of spawning because they're common to each thread! */
+	  shared_params.mutex = &mutex;
+	  shared_params.writable = &writable;
+	  shared_params.buffer = buffer;
+	  shared_params.bytes_read = bytes_read;
+	  shared_params.buffer_size = sizeof buffer; //as used in the read call above and in threads
+	  shared_params.num_writers_waiting = 0;
+	  shared_params.num_threads = n_outputs;
+	  shared_params.can_continue = can_continue;
+	  
+	  //Attach parameters to param containers and spawn the valid threads
 	  for (i = 0; i <= nfiles; i++) { 
-	  	if (descriptors[i]) { //don't start threads for bad descriptors!
-		  	tee_params[i].buffer = buffer;
-		  	tee_params[i].bytes_read = &bytes_read;
-		  	tee_params[i].descriptor = descriptors[i];
-		  	tee_params[i].files = files;
-		  	tee_params[i].mutex = &mutex;
-		  	tee_params[i].writable = &writable;
-		  	tee_params[i].numWritersWaiting = &numWritersWaiting;
-		  	tee_params[i].threadIndex = i;
-		  	tee_params[i].numThreads = nfiles;
-		  	tee_params[i].canContinue = &canContinue; //naughty variable re-use
+	  	if (descriptors[i]) { //don't start threads for bad descriptors!	
+		  	params[i].thread_index = i;
+		  	params[i].descriptor = descriptors[i];
+		  	params[i].file = files[i];
+		  	
+		  	containers[i].shared = &shared_params;
+		  	containers[i].params = &params[i];
+		  	
 		  	char stringBuffer[128] = {0};
-		  	sprintf(stringBuffer, "Starting a thread for descriptor %d\n", i);
+		  	sprintf(stringBuffer, "Starting thread index %d\n", i);
 		  	debugPrint(stringBuffer);
-		  	pthread_create(&workers[i], NULL, (void *)parallel_tee, &tee_params[i]);
+		  	pthread_create(&workers[i], NULL, (void *)parallel_tee, &containers[i]);
 	    }
 	  }
   
 	  //harvest finished threads
-	  //bool retval[nfiles];
+	  /* TODO FIXME make sure to only harvest threads actually spawned! Otherwise
+	   * we get segfaults most likely. */
 	  for (i = 0; i <= nfiles; i++) {
 	  	char stringBuffer[128] = {0};
 	  	sprintf(stringBuffer, "Waiting thread %d to die...\n", i);
 	  	debugPrint(stringBuffer);
 	  	
-	  	pthread_join(workers[i], (void *)NULL); //&retval[i]);
+	  	pthread_join(workers[i], (void *)NULL); 
 	  }
   }
 
