@@ -33,8 +33,11 @@
 #include <pthread.h>
 
 //TODO FIXME temporary for debugging
+//#define DEBUG
+#ifdef DEBUG
 #include <stdio.h>
 #include <stdlib.h>
+#endif
 
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "teep"
@@ -44,6 +47,8 @@
   proper_name ("Richard M. Stallman"), \
   proper_name ("David MacKenzie"), \
   proper_name ("Brandon Foltz")
+
+
 
 //These values are assigned individually to independent threads
 typedef struct teep_params_s {
@@ -232,26 +237,23 @@ static void *
 parallel_tee(void * container)
 {
 	teep_params_container_t * c = (teep_params_container_t *)container;
-	teep_params_shared_t * shared = (*c).shared;
-	teep_params_t * params = (*c).params;
-
-	char stringBuffer[128] = {0}; //TODO FIXME debugging only
-	//while ((*params).thread_index == 0) {} //lock first thread to avoid clobbering other threads
+	teep_params_shared_t * shared = (teep_params_shared_t *)(*c).shared;
+	teep_params_t * params = (teep_params_t *)(*c).params;
 
 	static bool ok = true;
 	bool can_continue = true;
 	bool refilled_buffer = false;
 	
-	sprintf(stringBuffer, "Thread: &shared_params: %p, &params: %p\n", shared, params);
+	#ifdef DEBUG
+	char stringBuffer[128] = {0}; //TODO FIXME debugging only
+	sprintf(stringBuffer, "Thread %d: &shared_params: %p, &params: %p\n", (*params).thread_index, shared, params);
 	debugPrint(stringBuffer);
+	#endif
 	
 	while (can_continue) {
 	
-		sprintf(stringBuffer, "Thread %d, buffer: %p, bytes_read: %ld, descriptor: %p\n",(*params).thread_index, (*shared).buffer, (*shared).bytes_read, (*params).descriptor);
-		debugPrint(stringBuffer);
-	
 		//Tee writing goes here
-		if ((*params).descriptor
+		if ((*params).descriptor 
 		&& fwrite ((*shared).buffer, (*shared).bytes_read, 1, (*params).descriptor) != 1)
 		{
 		
@@ -263,16 +265,18 @@ parallel_tee(void * container)
 			  clearerr (stdout); // Avoid redundant close_stdout diagnostic.  
 			if (fail)
 			{
-				error (output_error == output_error_exit
+				/*error (output_error == output_error_exit
 				   || output_error == output_error_exit_nopipe,
-				   w_errno, "%s", ((*params).file));
+				   w_errno, "%s", ((*params).file));*/
 			}
 			(*params).descriptor = NULL;
 			if (fail) {
 			  ok = false;
 			  //n_outputs--; //FIXME This indicates we should quit? Go in critical section?
+			  #ifdef DEBUG
 			  sprintf(stringBuffer, "Thread %d failed.\n", (*params).thread_index);
 			  debugPrint(stringBuffer); //FIXME only for debugging
+			  #endif
 			}
 		}
 	
@@ -281,23 +285,28 @@ parallel_tee(void * container)
 		
 		/*TODO Thread should do error HANDLING here, so it can update shared variables
 		such as number of threads, etc. */
+		if (!ok) {
+			(*shared).num_threads -= 1; //take self out!
+		}
 		
-		if ((*shared).num_writers_waiting == (*shared).num_threads) {
-		
-			//sprintf(stringBuffer, "Thread %d refilling the buffer.\n", (*params).thread_index);
-			//debugPrint(stringBuffer); //FIXME only for debugging
+		if ((*shared).num_writers_waiting >= (*shared).num_threads) {
 			
 			//refill the buffer, and trigger all threads quitting if necessary
 			(*shared).bytes_read = read (0, (*shared).buffer, (*shared).buffer_size);
-		    if ((*shared).bytes_read < 0 && errno == EINTR)
-			  (*shared).can_continue = true;
-		    if ((*shared).bytes_read <= 0) {
-			  (*shared).can_continue = false;
+		    if ((*shared).bytes_read < 0 && errno == EINTR) {
+			  can_continue = true;
 			}
-			can_continue = (*shared).can_continue; //signalling other threads to quit (or not)
+		    if ((*shared).bytes_read <= 0) {
+			  can_continue = false;
+			}
 			
 			(*shared).num_writers_waiting = 0;
 			refilled_buffer = true; 	
+			
+			#ifdef DEBUG
+			sprintf(stringBuffer, "Thread %d refilled the buffer with %ld bytes.\n", (*params).thread_index, (*shared).bytes_read);
+			debugPrint(stringBuffer); //FIXME only for debugging
+			#endif
 		} else {
 			pthread_cond_wait((*shared).writable, (*shared).mutex);
 		}
@@ -306,9 +315,13 @@ parallel_tee(void * container)
 			pthread_cond_broadcast((*shared).writable);
 			refilled_buffer = false;
 		}
+		
+		if (!ok) {
+			return NULL;
+		}
 	}    
 
-	return &ok;
+	return NULL;
 }
 
 /* Copy the standard input into each of the NFILES files in FILES
@@ -318,13 +331,15 @@ parallel_tee(void * container)
 static bool
 tee_files (int nfiles, char **files)
 {
+  #ifdef DEBUG
   char stringBuffer[128] = {0};
   sprintf(stringBuffer, "Starting tee_files\n");
   debugPrint(stringBuffer); //TODO FIXME debugging only
+  #endif
   
   size_t n_outputs = 0;
   FILE **descriptors;
-  char buffer[BUFSIZ];
+  char buffer[131072]; //char buffer[BUFSIZ];
   ssize_t bytes_read = 0;
   int i;
   bool ok = true;
@@ -347,8 +362,6 @@ tee_files (int nfiles, char **files)
   setvbuf (stdout, NULL, _IONBF, 0);
   n_outputs++; //standard output is always in the set of outputs
   
-  //sprintf(stringBuffer, "315: n_outputs: %d, nfiles: %d\n", n_outputs, nfiles);
-  //debugPrint(stringBuffer);
   for (i = 1; i <= nfiles; i++)
     {
       /* Do not treat "-" specially - as mandated by POSIX.  */
@@ -357,7 +370,7 @@ tee_files (int nfiles, char **files)
         {
           error (output_error == output_error_exit
                  || output_error == output_error_exit_nopipe,
-                 errno, "%s", quotef ("failed fixme")); //(files[i])); //FIXME ruling out cause of error
+                 errno, "%s", quotef (files[i])); 
           ok = false;
         }
       else
@@ -367,8 +380,10 @@ tee_files (int nfiles, char **files)
         }
     }
     
+  #ifdef DEBUG
   sprintf(stringBuffer, "336: n_outputs: %lu, nfiles: %d\n", n_outputs, nfiles);
   debugPrint(stringBuffer);  
+  #endif
     
   //Descriptors are open and ready to go, read in the first data buffer
   bytes_read = read(0, buffer, sizeof buffer);
@@ -380,12 +395,14 @@ tee_files (int nfiles, char **files)
     can_continue = false; 
   }
    
+  #ifdef DEBUG
   sprintf(stringBuffer, "348: Can continue: %d, bytes_read: %ld, errno: %d\n", (int)can_continue, bytes_read, errno);
   debugPrint(stringBuffer);   
+  #endif
    
   if (can_continue) { 
 	  //Setup and spawn worker threads (continued below)
-	  pthread_t workers[nfiles];
+	  pthread_t workers[nfiles+1];
 	  
 	  //These variables are shared among the threads
 	  pthread_mutex_t mutex;
@@ -394,8 +411,8 @@ tee_files (int nfiles, char **files)
 	  pthread_cond_init(&writable, NULL);
 	  
 	  //Set up parameter containers
-	  teep_params_container_t containers[nfiles];
-	  teep_params_t params[nfiles];
+	  teep_params_container_t containers[nfiles+1];
+	  teep_params_t params[nfiles+1];
 	  teep_params_shared_t shared_params;
 	  
 	  /* Setup shared parameters that will be attached to the parameter containers. 
@@ -416,14 +433,15 @@ tee_files (int nfiles, char **files)
 		  	params[i].descriptor = descriptors[i];
 		  	params[i].file = files[i];
 		  	
-		  	sprintf(stringBuffer, "Main: &shared_params: %p, &params: %p\n", &shared_params, &(params[i]));
-		  	debugPrint(stringBuffer);
 		  	containers[i].shared = &shared_params;
-		  	containers[i].params = &params[i];
+		  	containers[i].params = &(params[i]);
 		  	
-		  	sprintf(stringBuffer, "Starting thread index %d\n", i);
+		  	#ifdef DEBUG
+		  	sprintf(stringBuffer, "Main: thread_index: %d, &shared_params: %p, &params: %p\n", i, containers[i].shared, containers[i].params);
 		  	debugPrint(stringBuffer);
-		  	pthread_create(&workers[i], NULL, (void *)parallel_tee, &(containers[i]));
+			#endif
+
+		  	pthread_create(&workers[i], NULL, (void *)parallel_tee, &(containers[i])); //DON'T cast containers as a (void *) !!!
 	    }
 	  }
   
@@ -431,8 +449,10 @@ tee_files (int nfiles, char **files)
 	  /* TODO FIXME make sure to only harvest threads actually spawned! Otherwise
 	   * we get segfaults most likely. */
 	  for (i = 0; i <= nfiles; i++) {
+	    #ifdef DEBUG
 	  	sprintf(stringBuffer, "Waiting thread %d to die...\n", i);
 	  	debugPrint(stringBuffer);
+	  	#endif
 	  	
 	  	pthread_join(workers[i], (void *)NULL); 
 	  }
@@ -453,6 +473,11 @@ tee_files (int nfiles, char **files)
       }
 
   free (descriptors);
+  
+  #ifdef DEBUG
+  sprintf(stringBuffer, "Reached end of program with status %d!\n", ok);
+  debugPrint(stringBuffer);
+  #endif
 
   return ok;
 }
