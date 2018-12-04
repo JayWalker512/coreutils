@@ -47,7 +47,7 @@ time (cat fivetwelve | tee ${disk1}/fivetwelve ${disk2}/fivetwelve ${disk3}/five
 rm ${disk1}/fivetwelve ${disk2}/fivetwelve ${disk3}/fivetwelve
 
 echo "With Teep..."
-time (cat fivetwelve | tee ${disk1}/fivetwelve ${disk2}/fivetwelve ${disk3}/fivetwelve && sync)
+time (cat fivetwelve | src/tee ${disk1}/fivetwelve ${disk2}/fivetwelve ${disk3}/fivetwelve && sync)
 rm ${disk1}/fivetwelve ${disk2}/fivetwelve ${disk3}/fivetwelve
 
 echo "With Tee..."
